@@ -1,4 +1,4 @@
-use langspec::GatewayProxy;
+use langspec::proxy::GatewayProxy;
 use pingora::http::{RequestHeader, ResponseHeader};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};

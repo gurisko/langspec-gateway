@@ -1,4 +1,4 @@
-use langspec::GatewayProxy;
+use langspec::proxy::GatewayProxy;
 use log::info;
 use pingora::prelude::*;
 
