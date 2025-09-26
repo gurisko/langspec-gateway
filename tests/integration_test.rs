@@ -66,6 +66,31 @@ async fn test_response_headers() {
 }
 
 #[tokio::test]
+async fn test_centralized_header_policy() {
+    use langspec::proxy::headers::HeaderPolicy;
+
+    let policy = HeaderPolicy::new();
+
+    // Test request header mutations
+    let mut request = RequestHeader::build("POST", b"/api/test", None).unwrap();
+    policy.apply_upstream_request_headers(&mut request).unwrap();
+
+    // Verify X-Forwarded-By header was added
+    let forwarded_by = request.headers.get("X-Forwarded-By");
+    assert!(forwarded_by.is_some());
+    assert_eq!(forwarded_by.unwrap().to_str().unwrap(), "langspec-gateway");
+
+    // Test response header mutations
+    let mut response = ResponseHeader::build(200, None).unwrap();
+    policy.apply_response_headers(&mut response).unwrap();
+
+    // Verify X-Proxy header was added
+    let proxy_header = response.headers.get("X-Proxy");
+    assert!(proxy_header.is_some());
+    assert_eq!(proxy_header.unwrap().to_str().unwrap(), "langspec");
+}
+
+#[tokio::test]
 async fn test_various_http_methods() {
     // Test that different HTTP methods are handled correctly
     let methods = vec!["GET", "POST", "PUT", "DELETE", "PATCH"];

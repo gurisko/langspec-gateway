@@ -1,15 +1,15 @@
 use crate::pipeline::views::RequestView;
-use crate::provider::{Provider, ProviderKind};
+use crate::provider::{DetectionResult, Provider, ProviderKind};
 
-/// OpenAI API provider detection using conservative heuristics.
+/// OpenAI API provider detection using Chain-of-Responsibility approach.
 ///
-/// Matching Rules (any one match triggers detection):
-/// - Host: `api.openai.com` (exact match)
-/// - Header: `OpenAI-Organization` header present (any value)
-/// - Path: `/v1/` prefix with `/chat`, `/completions`, or `/responses` in path
+/// Detection Order (early exit on High confidence):
+/// 1. Host match: `api.openai.com` (High confidence)
+/// 2. Auth + corroboration: Bearer token + (host OR path) (High confidence)
+/// 3. Path patterns: `/v1/(chat|completions|responses)` (Medium confidence)
+/// 4. Headers: `OpenAI-Organization` (Low confidence)
 ///
 /// Conservative bias: Prefers false negatives over false positives.
-/// Precedence: First in registry order, takes priority over Bedrock for ambiguous cases.
 pub struct OpenAIProvider;
 
 impl Provider for OpenAIProvider {
@@ -21,31 +21,65 @@ impl Provider for OpenAIProvider {
         ProviderKind::OpenAI
     }
 
-    fn matches(&self, request_view: &RequestView) -> bool {
-        // Conservative heuristics for OpenAI detection
+    fn detect(&self, request_view: &RequestView) -> Option<DetectionResult> {
+        // 1. Explicit override (handled at registry level)
 
-        // Check host
+        // 2. Host match (High confidence)
         if let Some(host) = request_view.host()
             && host == "api.openai.com"
         {
-            return true;
+            return Some(DetectionResult::high_confidence(
+                ProviderKind::OpenAI,
+                "api.openai.com exact match",
+                "host",
+            ));
         }
 
-        // Check for OpenAI-Organization header
-        if request_view.header("OpenAI-Organization").is_some() {
-            return true;
+        // 3. Auth scheme + corroboration (High confidence)
+        if request_view.has_bearer_auth() {
+            // Bearer alone is not unique - need corroboration
+            let has_openai_host = request_view
+                .host()
+                .map(|h| h == "api.openai.com")
+                .unwrap_or(false);
+
+            let has_openai_path = request_view.path().starts_with("/v1/")
+                && (request_view.path().contains("/chat")
+                    || request_view.path().contains("/completions")
+                    || request_view.path().contains("/responses"));
+
+            if has_openai_host || has_openai_path {
+                return Some(DetectionResult::high_confidence(
+                    ProviderKind::OpenAI,
+                    "bearer token with OpenAI context",
+                    "auth",
+                ));
+            }
         }
 
-        // Check path patterns
+        // 4. Path namespace (Medium confidence)
         let path = request_view.path();
         if path.starts_with("/v1/")
             && (path.contains("/chat")
                 || path.contains("/completions")
                 || path.contains("/responses"))
         {
-            return true;
+            return Some(DetectionResult::medium_confidence(
+                ProviderKind::OpenAI,
+                "/v1/ API endpoints",
+                "path",
+            ));
         }
 
-        false
+        // 5. Provider-specific headers (Low confidence)
+        if request_view.header("OpenAI-Organization").is_some() {
+            return Some(DetectionResult::low_confidence(
+                ProviderKind::OpenAI,
+                "OpenAI-Organization header present",
+                "header",
+            ));
+        }
+
+        None
     }
 }

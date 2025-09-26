@@ -71,8 +71,9 @@ fn test_bedrock_detection_by_host() {
 }
 
 #[test]
-fn test_bedrock_detection_by_path() {
-    let request = create_test_request("POST", "/converse", Some("example.com"), &[]);
+fn test_bedrock_detection_by_path_with_aws_context() {
+    // Path pattern with AWS host context
+    let request = create_test_request("POST", "/converse", Some("api.amazonaws.com"), &[]);
     let request_view = RequestView::new(&request);
     let registry = ProviderRegistry::new();
 
@@ -156,7 +157,7 @@ fn test_openai_path_patterns() {
 }
 
 #[test]
-fn test_bedrock_path_patterns() {
+fn test_bedrock_path_patterns_with_aws_context() {
     let test_cases = vec![
         ("/converse", true),
         ("/invoke", true),
@@ -168,7 +169,8 @@ fn test_bedrock_path_patterns() {
     let registry = ProviderRegistry::new();
 
     for (path, should_match) in test_cases {
-        let request = create_test_request("POST", path, Some("example.com"), &[]);
+        // Test with AWS host context
+        let request = create_test_request("POST", path, Some("api.amazonaws.com"), &[]);
         let request_view = RequestView::new(&request);
         let result = registry.detect(&request_view);
 
@@ -176,14 +178,14 @@ fn test_bedrock_path_patterns() {
             assert_eq!(
                 result,
                 ProviderKind::Bedrock,
-                "Path {} should match Bedrock",
+                "Path {} with AWS host should match Bedrock",
                 path
             );
         } else {
             assert_eq!(
                 result,
                 ProviderKind::Unknown,
-                "Path {} should not match Bedrock",
+                "Path {} with AWS host should not match Bedrock",
                 path
             );
         }
@@ -203,7 +205,7 @@ fn test_precedence_openai_host_with_bedrock_path() {
 
 #[test]
 fn test_precedence_bedrock_host_with_openai_path() {
-    // OpenAI has registry precedence and matches first on path pattern
+    // Bedrock host should win due to High confidence in Chain-of-Responsibility
     let request = create_test_request(
         "POST",
         "/v1/chat/completions",
@@ -213,25 +215,25 @@ fn test_precedence_bedrock_host_with_openai_path() {
     let request_view = RequestView::new(&request);
     let registry = ProviderRegistry::new();
 
-    // Should detect as OpenAI due to registry precedence (first match wins)
-    // even though host suggests Bedrock
-    assert_eq!(registry.detect(&request_view), ProviderKind::OpenAI);
+    // Should detect as Bedrock due to High confidence host match (early exit)
+    // Host beats path pattern in Chain-of-Responsibility order
+    assert_eq!(registry.detect(&request_view), ProviderKind::Bedrock);
 }
 
 #[test]
 fn test_false_positive_guards() {
     let registry = ProviderRegistry::new();
 
-    // Generic invoke path without Bedrock indicators should not match
+    // Generic invoke path without AWS context should NOT match (conservative behavior)
     let request = create_test_request("POST", "/invoke", Some("generic-api.com"), &[]);
     let request_view = RequestView::new(&request);
     assert_eq!(
         registry.detect(&request_view),
-        ProviderKind::Bedrock,
-        "Generic /invoke should match Bedrock by path pattern"
+        ProviderKind::Unknown,
+        "Generic /invoke without AWS context should not match Bedrock"
     );
 
-    // OpenAI path on non-OpenAI host without OpenAI headers should still match by path
+    // OpenAI path on non-OpenAI host should still match by path pattern
     let request = create_test_request("POST", "/v1/chat/completions", Some("other-api.com"), &[]);
     let request_view = RequestView::new(&request);
     assert_eq!(
@@ -240,8 +242,163 @@ fn test_false_positive_guards() {
         "OpenAI path pattern should match regardless of host"
     );
 
+    // Bedrock path WITH AWS context should match
+    let request = create_test_request("POST", "/invoke", Some("api.amazonaws.com"), &[]);
+    let request_view = RequestView::new(&request);
+    assert_eq!(
+        registry.detect(&request_view),
+        ProviderKind::Bedrock,
+        "Bedrock path with AWS context should match"
+    );
+
     // Non-matching path and host should be Unknown
     let request = create_test_request("GET", "/api/health", Some("example.com"), &[]);
     let request_view = RequestView::new(&request);
     assert_eq!(registry.detect(&request_view), ProviderKind::Unknown);
+}
+
+#[test]
+fn test_explicit_override_header() {
+    let registry = ProviderRegistry::new();
+
+    // Override to OpenAI even with Bedrock-looking request
+    let request = create_test_request(
+        "POST",
+        "/converse",
+        Some("bedrock-runtime.amazonaws.com"),
+        &[("X-Langspec-Provider", "openai")],
+    );
+    let request_view = RequestView::new(&request);
+    assert_eq!(registry.detect(&request_view), ProviderKind::OpenAI);
+
+    // Override to Bedrock even with OpenAI-looking request
+    let request = create_test_request(
+        "POST",
+        "/v1/chat/completions",
+        Some("api.openai.com"),
+        &[("X-Langspec-Provider", "bedrock")],
+    );
+    let request_view = RequestView::new(&request);
+    assert_eq!(registry.detect(&request_view), ProviderKind::Bedrock);
+
+    // Override to Unknown
+    let request = create_test_request(
+        "POST",
+        "/v1/chat/completions",
+        Some("api.openai.com"),
+        &[("X-Langspec-Provider", "unknown")],
+    );
+    let request_view = RequestView::new(&request);
+    assert_eq!(registry.detect(&request_view), ProviderKind::Unknown);
+
+    // Invalid override should continue with normal detection
+    let request = create_test_request(
+        "POST",
+        "/v1/chat/completions",
+        Some("api.openai.com"),
+        &[("X-Langspec-Provider", "invalid")],
+    );
+    let request_view = RequestView::new(&request);
+    assert_eq!(registry.detect(&request_view), ProviderKind::OpenAI);
+}
+
+#[test]
+fn test_auth_based_detection() {
+    let registry = ProviderRegistry::new();
+
+    // AWS SigV4 auth should detect as Bedrock
+    let request = create_test_request(
+        "POST",
+        "/some/api",
+        Some("example.com"),
+        &[
+            ("Authorization", "AWS4-HMAC-SHA256 Credential=..."),
+            ("X-Amz-Date", "20231201T120000Z"),
+        ],
+    );
+    let request_view = RequestView::new(&request);
+    assert_eq!(registry.detect(&request_view), ProviderKind::Bedrock);
+
+    // Bearer token with OpenAI path should detect as OpenAI
+    let request = create_test_request(
+        "POST",
+        "/v1/chat/completions",
+        Some("custom-api.com"),
+        &[("Authorization", "Bearer sk-...")],
+    );
+    let request_view = RequestView::new(&request);
+    assert_eq!(registry.detect(&request_view), ProviderKind::OpenAI);
+
+    // Bearer token alone without corroboration should not match OpenAI
+    let request = create_test_request(
+        "POST",
+        "/api/chat",
+        Some("generic-api.com"),
+        &[("Authorization", "Bearer token123")],
+    );
+    let request_view = RequestView::new(&request);
+    assert_eq!(registry.detect(&request_view), ProviderKind::Unknown);
+}
+
+#[test]
+fn test_confidence_based_precedence() {
+    let registry = ProviderRegistry::new();
+
+    // High confidence should always win over medium confidence
+    // OpenAI host (High) should beat any medium confidence Bedrock detection
+    let request = create_test_request(
+        "POST",
+        "/converse", // This could match Bedrock at medium confidence with AWS context
+        Some("api.openai.com"), // But OpenAI host is High confidence
+        &[("X-Amz-Date", "20231201T120000Z")], // AWS header that could support Bedrock
+    );
+    let request_view = RequestView::new(&request);
+    assert_eq!(registry.detect(&request_view), ProviderKind::OpenAI);
+
+    // Medium confidence path should beat low confidence header-only
+    let request = create_test_request(
+        "POST",
+        "/v1/chat/completions", // OpenAI path (Medium confidence)
+        Some("example.com"),
+        &[("OpenAI-Organization", "org-123")], // OpenAI header (Low confidence)
+    );
+    let request_view = RequestView::new(&request);
+    assert_eq!(registry.detect(&request_view), ProviderKind::OpenAI);
+}
+
+#[test]
+fn test_enhanced_logging_signals() {
+    // This test verifies that the enhanced detection system works
+    // but doesn't check logs (would require capturing log output)
+    let registry = ProviderRegistry::new();
+
+    // Test host signal (High confidence)
+    let request = create_test_request("POST", "/v1/chat", Some("api.openai.com"), &[]);
+    let request_view = RequestView::new(&request);
+    assert_eq!(registry.detect(&request_view), ProviderKind::OpenAI);
+
+    // Test auth signal with corroboration (High confidence)
+    let request = create_test_request(
+        "POST",
+        "/v1/chat/completions",
+        Some("custom.com"),
+        &[("Authorization", "Bearer sk-123")],
+    );
+    let request_view = RequestView::new(&request);
+    assert_eq!(registry.detect(&request_view), ProviderKind::OpenAI);
+
+    // Test path signal (Medium confidence)
+    let request = create_test_request("POST", "/v1/completions", Some("example.com"), &[]);
+    let request_view = RequestView::new(&request);
+    assert_eq!(registry.detect(&request_view), ProviderKind::OpenAI);
+
+    // Test AWS SigV4 auth signal (High confidence)
+    let request = create_test_request(
+        "POST",
+        "/some/api",
+        Some("example.com"),
+        &[("Authorization", "AWS4-HMAC-SHA256 Credential=...")],
+    );
+    let request_view = RequestView::new(&request);
+    assert_eq!(registry.detect(&request_view), ProviderKind::Bedrock);
 }

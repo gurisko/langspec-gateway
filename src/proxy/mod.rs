@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::pipeline::Pipeline;
 use crate::proxy::ctx::Ctx;
+use crate::proxy::headers::HeaderPolicy;
 
 pub mod ctx;
 pub mod headers;
@@ -15,6 +16,7 @@ pub struct GatewayProxy {
     upstreams: Vec<String>,
     current_upstream: AtomicUsize,
     pipeline: Pipeline,
+    header_policy: HeaderPolicy,
 }
 
 impl GatewayProxy {
@@ -34,6 +36,7 @@ impl GatewayProxy {
             upstreams,
             current_upstream: AtomicUsize::new(0),
             pipeline: Pipeline::new(),
+            header_policy: HeaderPolicy::new(),
         }
     }
 
@@ -69,8 +72,9 @@ impl ProxyHttp for GatewayProxy {
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        // Add forwarded headers as before
-        upstream_request.insert_header("X-Forwarded-By", "langspec-gateway")?;
+        // Apply all upstream request header mutations
+        self.header_policy
+            .apply_upstream_request_headers(upstream_request)?;
 
         // Run pipeline to detect provider
         self.pipeline.on_request(upstream_request, ctx);
@@ -84,8 +88,9 @@ impl ProxyHttp for GatewayProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        // Add proxy header as before
-        upstream_response.insert_header("X-Proxy", "langspec")?;
+        // Apply all response header mutations
+        self.header_policy
+            .apply_response_headers(upstream_response)?;
 
         // Run pipeline response processing
         self.pipeline.on_response(upstream_response, ctx);
